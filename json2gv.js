@@ -8,35 +8,11 @@ const doc = `json2gv.js: build graphviz dot diagrams from JSON received via stdi
 var isTTY = process.stdin.isTTY;
 var stdout = process.stdout;
 
-
 /*
-// if field was inlined (id == 0) then print summary, else just the name and a link to the actual
-		if fieldID == 0 {
-			fields += fmt.Sprintf("|{<f%d> %s | %s} ", index, uType.Field(index).Name, summary)
-		} else {
-			fields += fmt.Sprintf("|<f%d> %s", index, uType.Field(index).Name)
-			links = append(links, fmt.Sprintf("  %d:f%d -> %d:name;\n", id, index, fieldID))
-		}
-	}
+  good docs on graphviz usage for datastructures via cpan - GraphViz::Data::Structure - alternative to GraphViz::Data::Grapher (perl): https://metacpan.org/pod/GraphViz::Data::Structure
 
-	node := fmt.Sprintf("  %d [label=\"<name> %s %s \"];\n", id, structVal.Type().Name(), fields)
-*/
-/*  good docs on graphviz usage for datastructures via cpan - GraphViz::Data::Structure - alternative to GraphViz::Data::Grapher (perl): https://metacpan.org/pod/GraphViz::Data::Structure
+  also: https://renenyffenegger.ch/notes/tools/Graphviz/elems/node/main-types/record-based
 
-# Object is an hash blessed into class "Foo".
-   # Hash assumed to contain (A=>1,B=>\$x,C=>"s").
-   # Horizontal, name on top:
-   $hports =
-   "{<port0>Foo|{{<port1>A|<port2>1}|{<port3>B|<port4>}|{<port5>C|<port6>s}}}";
-   # Vertical, name on left:
-   $vports =
-   "<port0>Foo|{<port1>A|<port3>B|<port5>C}|{<port2>1|<port4>|<port6>s}";
-
-   # Hash assumed to contain (A=>1,B=>\$x,C=>"s").
-      # Horizontal:
-      $hports = "{<port1>A|<port2>1}|{<port3>B|<port4>}|{<port5>C|<port6>s}";
-      # Vertical:
-      $vports = "{<port1>A|<port3>B|<port5>C}|{<port2>1|<port4>|<port6>s}";
 */
 
 function GraphMap(overrideParms) {
@@ -50,15 +26,23 @@ function GraphMap(overrideParms) {
       maxStringLen: 40,
       nodeIdPrefix: 'n',
       portIdPrefix: 'p',
-      graphDefaults: 'graph [rankdir="LR", label="gv-sample-00.gv", fontname="helvetica"]', // dpi=100
+      graphDefaults: 'graph [rankdir="LR", label="data", fontname="helvetica"]', // dpi=100
       nodeDefaults: 'node [fontsize="16", fontname="helvetica", shape="Mrecord"]', // labeltooltip="node"
       edgeDefaults: 'edge [fontname="helvetica"]', // , labeltooltip="edge"
       newLine: '\n',
+      inelineEmptyObjects: false,
      },
      ...overrideParms
     },
-    addNode: (node, id) => {
-      if (id == null) id = `${me.parms.nodeIdPrefix}${me.nodeNum++}`
+    safeForNodeId: (val) => {
+      return `${val}`.replace(/([^\w])/g, '')
+    },
+    addNode: (node, objName) => {
+      let id = `${me.parms.nodeIdPrefix}${me.nodeNum++}`
+      if (objName != null) {
+        id = `${id}_${objName}`
+      }
+      id = me.safeForNodeId(id)
       me.mapNodeToId.set(node, id)
       me.mapIdToNode[id] = node
       return id
@@ -78,20 +62,45 @@ function GraphMap(overrideParms) {
       return me
     },
     safeForLabel: (val) => {
-      let str = `${val}`.replace(/([{}"|<>])/g, '\\$1')
+      return `${val}`.replace(/([{}"|<>])/g, '\\$1')
+    },
+    safeForLabelLength: (val) => {
+      let str = me.safeForLabel(val)
       if (str.length > me.parms.maxStringLen) {
         str = `${str.substring(0,me.parms.maxStringLen-3)}...`
       }
       return str
+    },
+    safeForTooltip: (val) => {
+      return `${val}`.replace(/(["])/g, '\\$1')
+    },
+    optionalTooltipFor: (val, labelVal) => {
+      if (labelVal == null) labelVal = me.safeForLabelLength()
+      if (labelVal.endsWith('...')) {
+        return `tooltip="${me.safeForTooltip(val)}"`
+      }
+      return ''
+    },
+    inlineLabel: (val) => {  // Answer raw label value for in-lined struct, or return null to keep it separate
+      if (me.parms.inlineEmptyObjects) {
+        if (Array.isArray(val) && val.length == 0) {
+          return '[]'    // Note that shared empty arrays will not be shown correctly
+        } else if (typeof val === 'object' && val != null) {
+          if (Object.entries(val).length === 0) {
+            return '\\{\\}'  // Note that shared empty objects will not be shown correctly
+          }
+        }
+      }
+      return null
     },
   }
   return me
 }
 
 function traverseArray(idMaps, inObj, out, inObjName) {
-  let nodeId = idMaps.idForNode(inObj)
+  let nodeId = idMaps.idForNode(inObj, inObjName)
   if (nodeId != null) return nodeId // Already been here
-  nodeId = idMaps.addNode(inObj)
+  nodeId = idMaps.addNode(inObj, inObjName)
   if (inObjName == null) inObjName = ''
   let labels = []
   let edges = []
@@ -105,26 +114,34 @@ function traverseArray(idMaps, inObj, out, inObjName) {
   for (const [name, val] of entries) {
     let port = null
     if (typeof val === 'object' && val != null) { // includes Array
-      port = `${idMaps.parms.portIdPrefix}${idx}`
-      labels.push(`{<${idMaps.safeForLabel(port)}>${idMaps.safeForLabel(name)}}`)
+      const inlineValue = idMaps.inlineLabel(val)
+      if (inlineValue == null) {
+        port = `${idMaps.parms.portIdPrefix}${idx}`
+        labels.push(`{<${idMaps.safeForLabel(port)}>${idMaps.safeForLabel(name)}}`)
+      } else {
+        labels.push(`{${idMaps.safeForLabel(name)}|${inlineValue}}`)
+      }
     } else {
-      labels.push(`{${idMaps.safeForLabel(name)}|${idMaps.safeForLabel(val)}}`)
+      labels.push(`{${idMaps.safeForLabel(name)}|${idMaps.safeForLabelLength(val)}}`)
     }
     ports.push(port)
     idx++
   }
-  out.write(`${nodeId} [label="{${inObjName}|{${labels.join('|')}}}"]${idMaps.parms.newLine}`)
+  out.write(`${nodeId} [shape="record" label="${labels.join('|')}"]${idMaps.parms.newLine}`)
   idx = 0
   for (const [name, val] of entries) {
     if (typeof val === 'object' && val != null) { // includes Array
-      const id = traverseObj(idMaps, val, out, `${inObjName}[${name}]`)
-      let port = ports[idx]
-      if (port == null) {
-        port = ''
-      } else {
-        port = `:${port}`
+      const inlineValue = idMaps.inlineLabel(val)
+      if (inlineValue == null) {
+        const id = traverseObj(idMaps, val, out, `${inObjName}[${name}]`)
+        let port = ports[idx]
+        if (port == null) {
+          port = ''
+        } else {
+          port = `:${port}`
+        }
+        edges.push(`${nodeId}${port} -> ${id} [label="${inObjName}[${idMaps.safeForLabel(name)}]"]`)
       }
-      edges.push(`${nodeId}${port} -> ${id} [label="${inObjName}[${idMaps.safeForLabel(name)}]"]`)
     }
     idx++
   }
@@ -137,7 +154,7 @@ function traverseArray(idMaps, inObj, out, inObjName) {
 function traverseStruct(idMaps, inObj, out, inObjName) {
   let nodeId = idMaps.idForNode(inObj)
   if (nodeId != null) return nodeId // Already been here
-  nodeId = idMaps.addNode(inObj)
+  nodeId = idMaps.addNode(inObj, inObjName)
   let edgeNamePrefix = ''
   if (inObjName != null) {
     edgeNamePrefix = `${inObjName}.`
@@ -154,10 +171,16 @@ function traverseStruct(idMaps, inObj, out, inObjName) {
   for (const [name, val] of entries) {
     let port = null
     if (typeof val === 'object' && val != null) { // includes Array
-      port = `${idMaps.parms.portIdPrefix}${idx}`
-      labels.push(`{<${idMaps.safeForLabel(port)}>${idMaps.safeForLabel(name)}}`)
+      const inlineValue = idMaps.inlineLabel(val)
+      if (inlineValue == null) {
+        // port = `${idMaps.parms.portIdPrefix}${idx}`
+        port = name
+        labels.push(`{<${idMaps.safeForLabel(port)}>${idMaps.safeForLabel(name)}}`)
+      } else {
+        labels.push(`{${idMaps.safeForLabel(name)}|${inlineValue}}`)
+      }
     } else {
-      labels.push(`{${idMaps.safeForLabel(name)}|${idMaps.safeForLabel(val)}}`)
+      labels.push(`{${idMaps.safeForLabel(name)}|${idMaps.safeForLabelLength(val)}}`)
     }
     ports.push(port)
     idx++
@@ -166,14 +189,17 @@ function traverseStruct(idMaps, inObj, out, inObjName) {
   idx = 0
   for (const [name, val] of entries) {
     if (typeof val === 'object' && val != null) { // includes Array
-      const id = traverseObj(idMaps, val, out, name)
-      let port = ports[idx]
-      if (port == null) {
-        port = ''
-      } else {
-        port = `:${port}`
+      const inlineValue = idMaps.inlineLabel(val)
+      if (inlineValue == null) {
+        const id = traverseObj(idMaps, val, out, name)
+        let port = ports[idx]
+        if (port == null) {
+          port = ''
+        } else {
+          port = `:${port}`
+        }
+        edges.push(`${nodeId}${port} -> ${id} [label="${idMaps.safeForLabel(edgeNamePrefix + name)}"]`)
       }
-      edges.push(`${nodeId}${port} -> ${id} [label="${idMaps.safeForLabel(edgeNamePrefix + name)}"]`)
     }
     idx++
   }
@@ -192,21 +218,37 @@ function traverseObj(idMaps, inObj, out, inObjName) {
     nodeId = traverseStruct(idMaps, inObj, out, inObjName)
   } else { // Shouldn't really get here for primitives
     const prim = {type: typeof inObj, value: `${inObj}`}
-    nodeId = idMaps.addNode(prim)
+    nodeId = idMaps.addNode(prim, inObjName)
     out.write(`${nodeId} [shape="ellipse" label="${prim.value}"]`)
   }
   return nodeId
 }
 
 
-function gvFromJson(idMaps, inObj, out) {
+function gvFromJson(inObj, out) {
+  const idMaps = GraphMap()
   idMaps.writeHeader(out)
   traverseObj(idMaps, inObj, out)
   idMaps.writeTrailer(out)
 }
 
 // Eventually handle {low,high} numbers, heuristics for children, labels, PROFILE and EXPLAIN output
-function gvFromNeo4jJson(idMaps, inObj, out) {
+function gvFromNeo4jJson(inObj, out) {
+  const idMaps = GraphMap({inlineEmptyObjects: true})
+  const original_inlineLabel = idMaps.inlineLabel
+  idMaps.inlineLabel = (val) => {
+    let label = original_inlineLabel(val)
+    if (label == null) {
+      if (typeof val === 'object') {
+        const entries = Object.entries(val)
+        if (entries.length == 2 && entries.reduce((sum, e) => sum && (['low','high'].includes(e[0])), true)) {
+          if (val.high === 0) return `${val.low}`
+          return `{low: ${val.low}|high: ${val.high}}`
+        }
+      }
+    }
+    return label
+  }
   idMaps.writeHeader(out)
   traverseObj(idMaps, inObj, out)
   idMaps.writeTrailer(out)
@@ -316,10 +358,10 @@ function main(args) {
   let cmd = args[0].toLowerCase()
   if (cmd === 'json') {
     let obj = objectFromStdin()
-    gvFromJson(GraphMap(), obj, stdout)
+    gvFromJson(obj, stdout)
   } else if (cmd === 'neo4j') {
     let obj = objectFromStdin()
-    gvFromNeo4jJson(GraphMap(), obj, stdout)
+    gvFromNeo4jJson(obj, stdout)
   } else {
       console.error(`unknown command ${args[0]}\n${doc}`)
   }
@@ -332,4 +374,5 @@ if (require.main === module) {  // Run via CLI, not require() or import {}
 /*
  ./json2gv.js json <<<'{"foo":1}'
  ./json2gv.js json <<<'{"foo":"test{}", "bar": {"foo": 1, "blech": {}}, "b": {"name": "This is b"}, "c": ["a1","a2","a3"] }'
+ ./json2gv.js neo4j <out-neo4j-profile-06.json | pbcopy
 */
