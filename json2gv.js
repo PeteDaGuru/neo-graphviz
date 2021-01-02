@@ -71,13 +71,16 @@ function GraphMap(overrideParms) {
       }
       return str
     },
+    traverseObj: (inObj, out, inObjName) => {  // Default traversal
+      return traverseObj(me, inObj, out, inObjName)
+    },
     safeForTooltip: (val) => {
       return `${val}`.replace(/(["])/g, '\\$1')
     },
     optionalTooltipFor: (val, labelVal) => {
       if (labelVal == null) labelVal = me.safeForLabelLength()
       if (labelVal.endsWith('...')) {
-        return `tooltip="${me.safeForTooltip(val)}"`
+        return ` tooltip="${me.safeForTooltip(val)}"`
       }
       return ''
     },
@@ -111,6 +114,7 @@ function traverseArray(idMaps, inObj, out, inObjName) {
     return nodeId
   }
   let idx = 0
+  let tooltip = ''
   for (const [name, val] of entries) {
     let port = null
     if (typeof val === 'object' && val != null) { // includes Array
@@ -120,27 +124,28 @@ function traverseArray(idMaps, inObj, out, inObjName) {
         labels.push(`{<${idMaps.safeForLabel(port)}>${idMaps.safeForLabel(name)}}`)
       } else {
         labels.push(`{${idMaps.safeForLabel(name)}|${inlineValue}}`)
+        if (tooltip.length === 0) {
+          tooltip = idMaps.optionalTooltipFor(inlineValue,inlineValue)
+        }
       }
     } else {
-      labels.push(`{${idMaps.safeForLabel(name)}|${idMaps.safeForLabelLength(val)}}`)
+      const labelVal = idMaps.safeForLabelLength(val)
+      labels.push(`{${idMaps.safeForLabel(name)}|${labelVal}}`)
+      if (tooltip.length === 0) {
+        tooltip = idMaps.optionalTooltipFor(val,labelVal)
+      }
     }
     ports.push(port)
     idx++
   }
-  out.write(`${nodeId} [shape="record" label="${labels.join('|')}"]${idMaps.parms.newLine}`)
+  out.write(`${nodeId} [shape="record" label="${labels.join('|')}"${tooltip}]${idMaps.parms.newLine}`)
   idx = 0
   for (const [name, val] of entries) {
     if (typeof val === 'object' && val != null) { // includes Array
-      const inlineValue = idMaps.inlineLabel(val)
-      if (inlineValue == null) {
-        const id = traverseObj(idMaps, val, out, `${inObjName}[${name}]`)
-        let port = ports[idx]
-        if (port == null) {
-          port = ''
-        } else {
-          port = `:${port}`
-        }
-        edges.push(`${nodeId}${port} -> ${id} [label="${inObjName}[${idMaps.safeForLabel(name)}]"]`)
+      const port = ports[idx]
+      if (port != null) {
+        const id = idMaps.traverseObj(val, out, `${inObjName}[${name}]`)
+        edges.push(`${nodeId}:${port} -> ${id} [label="${inObjName}[${idMaps.safeForLabel(name)}]"]`)
       }
     }
     idx++
@@ -159,6 +164,7 @@ function traverseStruct(idMaps, inObj, out, inObjName) {
   if (inObjName != null) {
     edgeNamePrefix = `${inObjName}.`
   }
+  let tooltip = ''
   let labels = []
   let edges = []
   let ports = []
@@ -178,27 +184,28 @@ function traverseStruct(idMaps, inObj, out, inObjName) {
         labels.push(`{<${idMaps.safeForLabel(port)}>${idMaps.safeForLabel(name)}}`)
       } else {
         labels.push(`{${idMaps.safeForLabel(name)}|${inlineValue}}`)
+        if (tooltip.length === 0) {
+          tooltip = idMaps.optionalTooltipFor(inlineValue,inlineValue)
+        }
       }
     } else {
-      labels.push(`{${idMaps.safeForLabel(name)}|${idMaps.safeForLabelLength(val)}}`)
+      const labelVal = idMaps.safeForLabelLength(val)
+      labels.push(`{${idMaps.safeForLabel(name)}|${labelVal}}`)
+      if (tooltip.length === 0) {
+        tooltip = idMaps.optionalTooltipFor(val,labelVal)
+      }
     }
     ports.push(port)
     idx++
   }
-  out.write(`${nodeId} [label="${labels.join('|')}"]${idMaps.parms.newLine}`)
+  out.write(`${nodeId} [label="${labels.join('|')}"${tooltip}]${idMaps.parms.newLine}`)
   idx = 0
   for (const [name, val] of entries) {
     if (typeof val === 'object' && val != null) { // includes Array
-      const inlineValue = idMaps.inlineLabel(val)
-      if (inlineValue == null) {
-        const id = traverseObj(idMaps, val, out, name)
-        let port = ports[idx]
-        if (port == null) {
-          port = ''
-        } else {
-          port = `:${port}`
-        }
-        edges.push(`${nodeId}${port} -> ${id} [label="${idMaps.safeForLabel(edgeNamePrefix + name)}"]`)
+      const port = ports[idx]
+      if (port != null) {
+        const id = idMaps.traverseObj(val, out, name)
+        edges.push(`${nodeId}:${port} -> ${id} [label="${idMaps.safeForLabel(edgeNamePrefix + name)}"]`)
       }
     }
     idx++
@@ -209,8 +216,9 @@ function traverseStruct(idMaps, inObj, out, inObjName) {
   return nodeId
 }
 
-// Main method for traversing an object tree - answer nodeId
+// Default method for traversing an object tree - answer nodeId
 function traverseObj(idMaps, inObj, out, inObjName) {
+  // Not here: let nodeId = idMaps.idForNode(inObj); if (nodeId != null) return nodeId // Already been here
   let nodeId = null
   if (Array.isArray(inObj)) {
     nodeId = traverseArray(idMaps, inObj, out, inObjName)
@@ -228,8 +236,92 @@ function traverseObj(idMaps, inObj, out, inObjName) {
 function gvFromJson(inObj, out) {
   const idMaps = GraphMap()
   idMaps.writeHeader(out)
-  traverseObj(idMaps, inObj, out)
+  idMaps.traverseObj(inObj, out)
   idMaps.writeTrailer(out)
+}
+
+
+
+function traverseObjNeo4j(idMaps, inObj, out, inObjName) {
+  // Not here: let nodeId = idMaps.idForNode(inObj); if (nodeId != null) return nodeId // Already been here
+  nodeId = null //TODO handleNeo4jSummary(idMaps, inObj, out, inObjName)
+  if (nodeId == null) nodeId = traverseNeo4jProfile(idMaps, inObj, out, inObjName)
+  if (nodeId == null) nodeId = traverseObj(idMaps, inObj, out, inObjName)
+  return nodeId
+}
+
+// Handle neo4j result summary.profile and summary.plan if possible
+function traverseNeo4jProfile(idMaps, inObj, out, inObjName) {
+  let nodeId = idMaps.idForNode(inObj)
+  if (nodeId != null) return nodeId // Already been here
+  if (inObj == null || typeof inObj !== 'object') return null
+  const entries = Object.entries(inObj)
+  // if (!includesAll(entries,['identifiers','arguments','children'])) return null
+  if (!Array.isArray(inObj.identifiers) || inObj.arguments == null || !Array.isArray(inObj.children)) return null
+  nodeId = idMaps.addNode(inObj, inObjName)
+  let edgeNamePrefix = ''
+  if (inObjName != null) {
+    edgeNamePrefix = `${inObjName}.`
+  }
+  const operatorType = inObj.operatorType // can use for name
+  if (operatorType != null) {
+    edgeNamePrefix = `${operatorType}.`
+  }
+  let labels = []
+  let edges = []
+  let ports = []
+  let followingEntries = []  // corresponds with ports, but not necessarily to labels array
+  for (const [name, val] of entries) {
+    let port = null
+    if (typeof val === 'object' && val != null) { // includes Array
+      const inlineValue = idMaps.inlineLabel(val)
+      if (inlineValue == null) {
+        if (name === 'identifiers') {
+          labels.push(`{${idMaps.safeForLabel(name)}|{{${val.map(e => idMaps.safeForLabel(e)).join('|')}}}}`)
+        } else if (name === 'children') {
+          port = name
+          labels.push(`{<${idMaps.safeForLabel(port)}>${idMaps.safeForLabel(name)}}`)
+          for (let i=0; i < val.length; i++) {
+            let label = name
+            if (val.length > 1) label = `${label}[${i}]`
+            followingEntries.push([label, val[i]])
+            ports.push(port)
+          }
+        } else {
+          port = name
+          labels.push(`{<${idMaps.safeForLabel(port)}>${idMaps.safeForLabel(name)}}`)
+          followingEntries.push([name, val])
+          ports.push(port)
+        }
+      } else {
+        labels.push(`{${idMaps.safeForLabel(name)}|${inlineValue}}`)
+      }
+    } else {
+      labels.push(`{${idMaps.safeForLabel(name)}|${idMaps.safeForLabelLength(val)}}`)
+    }
+  }
+  out.write(`${nodeId} [label="${labels.join('|')}"]${idMaps.parms.newLine}`)
+  for (let idx=0; idx < followingEntries.length; idx++) {
+    const name = followingEntries[idx][0]
+    const val = followingEntries[idx][1]
+    const port = ports[idx]
+    if (port != null) {
+      const id = idMaps.traverseObj(val, out, name)
+      edges.push(`${nodeId}:${port} -> ${id} [label="${idMaps.safeForLabel(edgeNamePrefix + name)}"]`)
+    }
+  }
+  for (const e of edges) {
+    out.write(`${e}${idMaps.parms.newLine}`)
+  }
+  return nodeId
+}
+
+function includesAll(entries, attrNames) {
+  const names = entries.map(e => e[0])
+  for (const e of attrNames) {
+    if (!names.includes(e)) return false
+  }
+  return true
 }
 
 // Eventually handle {low,high} numbers, heuristics for children, labels, PROFILE and EXPLAIN output
@@ -241,16 +333,20 @@ function gvFromNeo4jJson(inObj, out) {
     if (label == null) {
       if (typeof val === 'object') {
         const entries = Object.entries(val)
-        if (entries.length == 2 && entries.reduce((sum, e) => sum && (['low','high'].includes(e[0])), true)) {
+        // neo4j represents integers with {low,high} to allow 64-bit integers to work in Javascript (where numbers lose precision after 2^53 - 1 Number.MAX_SAFE_INTEGER=9007199254740991 )
+        if (entries.length == 2 && includesAll(entries,['low','high'])) {
           if (val.high === 0) return `${val.low}`
-          return `{low: ${val.low}|high: ${val.high}}`
+          return `{{low|${val.low}}|{high|${val.high}}}`
         }
       }
     }
     return label
   }
+  idMaps.traverseObj = (inObj, out, inObjName) => {
+    return traverseObjNeo4j(idMaps, inObj, out, inObjName)
+  },
   idMaps.writeHeader(out)
-  traverseObj(idMaps, inObj, out)
+  idMaps.traverseObj(inObj, out)
   idMaps.writeTrailer(out)
 }
 /*
@@ -375,4 +471,7 @@ if (require.main === module) {  // Run via CLI, not require() or import {}
  ./json2gv.js json <<<'{"foo":1}'
  ./json2gv.js json <<<'{"foo":"test{}", "bar": {"foo": 1, "blech": {}}, "b": {"name": "This is b"}, "c": ["a1","a2","a3"] }'
  ./json2gv.js neo4j <out-neo4j-profile-06.json | pbcopy
+ for f in 01 02 03 04 05 06 ; do (./json2gv.js neo4j <out-neo4j-profile-$f.json >gv-neo4j-profile-$f.gv) ; done
+
+node --inspect-brk ./json2gv.js neo4j <out-neo4j-profile-06.json |pbcopy
 */
