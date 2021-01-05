@@ -10,16 +10,14 @@ var stdout = process.stdout;
 
 /*
   good docs on graphviz usage for datastructures via cpan - GraphViz::Data::Structure - alternative to GraphViz::Data::Grapher (perl): https://metacpan.org/pod/GraphViz::Data::Structure
-
-  also: https://renenyffenegger.ch/notes/tools/Graphviz/elems/node/main-types/record-based
-
+  docs on GraphViz records: https://renenyffenegger.ch/notes/tools/Graphviz/elems/node/main-types/record-based
 */
-
 function GraphMap(overrideParms) {
  const me = {
     mapIdToNode: {},
     mapNodeToId: new WeakMap(),
     nodeNum: 0,
+    dbMap: {},  // DB node identity map to GV node id
     parms: {
      ...{
       name: 'json',
@@ -36,6 +34,9 @@ function GraphMap(overrideParms) {
     },
     safeForNodeId: (val) => {
       return `${val}`.replace(/([^\w])/g, '')
+    },
+    safeForPort: (val) => {
+      return `${val}`.replace(/([^\w])/g, '_')
     },
     addNode: (node, objName) => {
       let id = `${me.parms.nodeIdPrefix}${me.nodeNum++}`
@@ -180,7 +181,7 @@ function traverseStruct(idMaps, inObj, out, inObjName) {
       const inlineValue = idMaps.inlineLabel(val)
       if (inlineValue == null) {
         // port = `${idMaps.parms.portIdPrefix}${idx}`
-        port = name
+        port = `${idMaps.safeForPort(name)}`
         labels.push(`{<${idMaps.safeForLabel(port)}>${idMaps.safeForLabel(name)}}`)
       } else {
         labels.push(`{${idMaps.safeForLabel(name)}|${inlineValue}}`)
@@ -244,7 +245,7 @@ function gvFromJson(inObj, out) {
 
 function traverseObjNeo4j(idMaps, inObj, out, inObjName) {
   // Not here: let nodeId = idMaps.idForNode(inObj); if (nodeId != null) return nodeId // Already been here
-  nodeId = null //TODO handleNeo4jSummary(idMaps, inObj, out, inObjName)
+  let nodeId = traverseNeo4jNodeProperties(idMaps, inObj, out, inObjName)
   if (nodeId == null) nodeId = traverseNeo4jProfile(idMaps, inObj, out, inObjName)
   if (nodeId == null) nodeId = traverseObj(idMaps, inObj, out, inObjName)
   return nodeId
@@ -279,7 +280,7 @@ function traverseNeo4jProfile(idMaps, inObj, out, inObjName) {
         if (name === 'identifiers') {
           labels.push(`{${idMaps.safeForLabel(name)}|{{${val.map(e => idMaps.safeForLabel(e)).join('|')}}}}`)
         } else if (name === 'children') {
-          port = name
+          port = `${idMaps.safeForPort(name)}`
           labels.push(`{<${idMaps.safeForLabel(port)}>${idMaps.safeForLabel(name)}}`)
           for (let i=0; i < val.length; i++) {
             let label = name
@@ -316,12 +317,95 @@ function traverseNeo4jProfile(idMaps, inObj, out, inObjName) {
   return nodeId
 }
 
+// Handle neo4j node properties (identity, labesl, properties triple) if JSON looks right
+function traverseNeo4jNodeProperties(idMaps, inObj, out, inObjName) {
+  let nodeId = idMaps.idForNode(inObj)
+  if (nodeId != null) return nodeId // Already been here
+  if (inObj == null || typeof inObj !== 'object') return null
+  let edgeNamePrefix = ''
+  if (inObjName != null) {
+    edgeNamePrefix = `${inObjName}.`
+  }
+  let labels = []
+  let edges = []
+  let ports = []
+  let followingEntries = []  // corresponds with ports, but not necessarily to labels array
+  let dbId = null
+  let entries = Object.entries(inObj)
+  try {
+    if (entries.length === 3 && includesAll(entries, ['identity', 'labels', 'properties'])
+      && (typeof inObj.properties === 'object' && inObj.properties != null)
+      && Array.isArray(inObj.labels)
+      && inObj.identity != null)
+    {
+      dbId = dbIdToStr(inObj.identity)
+      let existingId = idMaps.dbMap[dbId]
+      if (existingId != null) {  // raw neo4j json tree can have multiple copies of node with same identity
+        return existingId
+      }
+      let dbLabel = inObj.labels.join(':')
+      entries = Object.entries(inObj.properties)
+      entries.push(['dbId', dbId])
+      if (dbLabel.length > 0) entries.push(['dbLabel',dbLabel])
+    } else {
+      return null
+    }
+  } catch (ex) {
+    console.error('error: traverseNeo4jNodeProperties ${edgeNamePrefix}', ex)
+    return null
+  }
+  if (dbId == null) return null
+  nodeId = idMaps.addNode(inObj, inObjName)
+  idMaps.dbMap[dbId] = nodeId
+  for (const [name, val] of entries) {
+    let port = null
+    if (typeof val === 'object' && val != null) { // includes Array
+      const inlineValue = idMaps.inlineLabel(val)
+      if (inlineValue == null) {
+        port = `${idMaps.safeForPort(name)}`
+        labels.push(`{<${idMaps.safeForLabel(port)}>${idMaps.safeForLabel(name)}}`)
+        followingEntries.push([name, val])
+        ports.push(port)
+      } else {
+        labels.push(`{${idMaps.safeForLabel(name)}|${inlineValue}}`)
+      }
+    } else {
+      labels.push(`{${idMaps.safeForLabel(name)}|${idMaps.safeForLabelLength(val)}}`)
+    }
+  }
+  out.write(`${nodeId} [label="${labels.join('|')}"]${idMaps.parms.newLine}`)
+  for (let idx=0; idx < followingEntries.length; idx++) {
+    const name = followingEntries[idx][0]
+    const val = followingEntries[idx][1]
+    const port = ports[idx]
+    if (port != null) {
+      const id = idMaps.traverseObj(val, out, name)
+      edges.push(`${nodeId}:${port} -> ${id} [label="${idMaps.safeForLabel(edgeNamePrefix + name)}"]`)
+    }
+  }
+  for (const e of edges) {
+    out.write(`${e}${idMaps.parms.newLine}`)
+  }
+  return nodeId
+}
+
 function includesAll(entries, attrNames) {
   const names = entries.map(e => e[0])
   for (const e of attrNames) {
     if (!names.includes(e)) return false
   }
   return true
+}
+
+function dbIdToStr(dbId) {
+  if (typeof dbId === 'object' && dbId != null) {
+    if (dbId.high !== 0) {
+      return `${dbId.high}_${dbId.low}`
+    } else {
+      return `${dbId.low}`
+    }
+  }
+  return `${dbId}`
 }
 
 // Eventually handle {low,high} numbers, heuristics for children, labels, PROFILE and EXPLAIN output
@@ -441,22 +525,32 @@ function addRecord(digraph, data, record) {
 }
 */
 
-function objectFromStdin() {
-  data = require('fs').readFileSync(0, 'utf-8')
-  return JSON.parse(data)
+async function objectFromStdin(readable) {
+  // This can fail on windows, only get first 64K: data = require('fs').readFileSync(0, 'utf-8')
+  let text = ''
+  if (readable == null) {
+    readable = process.stdin
+    readable.setEncoding('utf-8')
+  } else if (typeof readable === 'string') {
+    readable = require('fs').createReadStream(readable, {encoding: 'utf8'});
+  }
+  for await (const chunk of readable) {
+    text += chunk
+  }
+  return JSON.parse(text)
 }
 
-function main(args) {
+async function main(args) {
   if (args.length === 0 || args[0].length === 0 || args[0][0] === '?' || args[0] === 'help' || args[0][0] === '-' || isTTY) {
       console.error(doc)
       return
   }
   let cmd = args[0].toLowerCase()
   if (cmd === 'json') {
-    let obj = objectFromStdin()
+    let obj = await objectFromStdin()
     gvFromJson(obj, stdout)
   } else if (cmd === 'neo4j') {
-    let obj = objectFromStdin()
+    let obj = await objectFromStdin()
     gvFromNeo4jJson(obj, stdout)
   } else {
       console.error(`unknown command ${args[0]}\n${doc}`)
@@ -464,7 +558,7 @@ function main(args) {
 }
 
 if (require.main === module) {  // Run via CLI, not require() or import {}
-    main(process.argv.slice(2));
+   main(process.argv.slice(2));
 }
 
 /*
